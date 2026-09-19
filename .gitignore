@@ -1,0 +1,27 @@
+# Ignore all Jupyter Notebook checkpoint folders
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# Secret API Keys and Environment Variables
+.env
+*.env
+.streamlit/secrets.toml
+
+# Python Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python Bytecode and Runtime Cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE Configurations
+.vscode/
+.idea/
+
+# OS Temp Files
+.DS_Store
+Thumbs.db
