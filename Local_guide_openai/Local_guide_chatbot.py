@@ -1,98 +1,146 @@
 import os
 import io
 import time
-
 import streamlit as st
+
+from dotenv import load_dotenv
 from openai import OpenAI
 from fpdf import FPDF
 from gtts import gTTS
 
+# ============================================================
+# LOAD ENVIRONMENT VARIABLES
+# ============================================================
 
-# ==============================================================================
-# 1. PAGE & THEME CONFIGURATION
-# ==============================================================================
+load_dotenv()
+
+
+# ============================================================
+# OPTIONAL DUCKDUCKGO IMPORT
+# ============================================================
+
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        DDGS = None
+
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="Smart Local Guide",
-    page_icon="📍",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_icon="🧭",
+    layout="wide"
 )
 
 
+# ============================================================
+# THEMES
+# ============================================================
+
 THEMES = {
     "Warm Aesthetic": {
-        "primaryColor": "#D97706",
-        "backgroundColor": "#FFFBEB",
-        "secondaryBackgroundColor": "#FEF3C7",
-        "textColor": "#78350F",
+        "background": "#FFF8F0",
+        "text": "#3D2B1F",
+        "primary": "#C76B3C",
+        "secondary": "#F2D4C4"
     },
-
     "Rose Gold": {
-        "primaryColor": "#E11D48",
-        "backgroundColor": "#FFF1F2",
-        "secondaryBackgroundColor": "#FFE4E6",
-        "textColor": "#881337",
+        "background": "#FFF5F7",
+        "text": "#4A3038",
+        "primary": "#B76E79",
+        "secondary": "#F3D6DC"
     },
-
     "Sage Green": {
-        "primaryColor": "#059669",
-        "backgroundColor": "#ECFDF5",
-        "secondaryBackgroundColor": "#D1FAE5",
-        "textColor": "#065F46",
+        "background": "#F4F8F1",
+        "text": "#304332",
+        "primary": "#718C70",
+        "secondary": "#DCE8D8"
     },
-
     "Classic Light": {
-        "primaryColor": "#2563EB",
-        "backgroundColor": "#FFFFFF",
-        "secondaryBackgroundColor": "#F3F4F6",
-        "textColor": "#1F2937",
+        "background": "#FFFFFF",
+        "text": "#222222",
+        "primary": "#4F6D8A",
+        "secondary": "#E8EEF3"
     }
 }
 
 
-# Theme selector
-selected_theme = st.sidebar.selectbox(
-    "🎨 Choose Theme",
-    list(THEMES.keys()),
-    index=0
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.title("🧭 Smart Local Guide")
+
+theme_choice = st.sidebar.selectbox(
+    "Choose Theme",
+    list(THEMES.keys())
 )
 
-theme_colors = THEMES[selected_theme]
+theme = THEMES[theme_choice]
+
+st.sidebar.markdown("---")
+
+model_choice = st.sidebar.selectbox(
+    "Gemini Model",
+    [
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite"
+    ]
+)
+
+strict_radius = st.sidebar.checkbox(
+    "Strict 3 km radius",
+    value=False
+)
 
 
-# Dynamic CSS
+# ============================================================
+# CUSTOM CSS
+# ============================================================
+
 st.markdown(
     f"""
     <style>
-
     .stApp {{
-        background-color: {theme_colors['backgroundColor']};
-        color: {theme_colors['textColor']};
+        background-color: {theme["background"]};
+        color: {theme["text"]};
     }}
 
-    .stButton>button {{
-        background-color: {theme_colors['primaryColor']};
+    h1, h2, h3 {{
+        color: {theme["text"]};
+    }}
+
+    .stButton > button {{
+        background-color: {theme["primary"]};
         color: white;
-        border-radius: 8px;
+        border-radius: 10px;
         border: none;
+        padding: 0.5rem 1rem;
     }}
 
-    .stSidebar {{
-        background-color: {theme_colors['secondaryBackgroundColor']};
+    .stButton > button:hover {{
+        background-color: {theme["primary"]};
+        color: white;
     }}
-
     </style>
     """,
     unsafe_allow_html=True
 )
 
 
-# ==============================================================================
-# 2. SESSION STATE
-# ==============================================================================
-
-# Each feature has its own history.
+# ============================================================
+# SESSION STATE - SEPARATE HISTORIES
+# ============================================================
 
 if "itinerary_history" not in st.session_state:
     st.session_state.itinerary_history = []
@@ -110,21 +158,28 @@ if "medical_history" not in st.session_state:
     st.session_state.medical_history = []
 
 
-# ==============================================================================
-# 3. GEMINI CLIENT
-# ==============================================================================
+# ============================================================
+# GEMINI CLIENT
+# ============================================================
 
-def get_gemini_client(user_api_key=""):
+def get_gemini_client():
     """
-    Create Gemini client using Google's OpenAI-compatible API.
+    Gets Gemini API key from environment variables.
+
+    Locally:
+        .env file
+
+    Render:
+        Environment Variable
+        GEMINI_API_KEY
     """
 
-    api_key = os.environ.get("GEMINI_API_KEY") or user_api_key
+    api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
-        st.sidebar.error(
-            "⚠️ Please provide a Google AI Studio Gemini API Key "
-            "in the sidebar or GEMINI_API_KEY environment variable."
+        st.error(
+            "Gemini API key is not configured. "
+            "Please set the GEMINI_API_KEY environment variable."
         )
         return None
 
@@ -134,25 +189,16 @@ def get_gemini_client(user_api_key=""):
     )
 
 
-# ==============================================================================
-# 4. GEMINI RESPONSE FUNCTION
-# ==============================================================================
+# ============================================================
+# GEMINI RESPONSE WITH RETRY / FALLBACK
+# ============================================================
 
 def generate_response(system_prompt, user_prompt, model):
-    """
-    Generate a response from Gemini.
 
-    Includes:
-    - Automatic retry
-    - Fallback models
-    - Handling of temporary 503 errors
-    """
+    client = get_gemini_client()
 
     if not client:
         return None
-
-    # First try the model selected by the user.
-    # Then try fallback models if a temporary 503 error occurs.
 
     fallback_models = [
         model,
@@ -161,7 +207,6 @@ def generate_response(system_prompt, user_prompt, model):
         "gemini-3.1-flash-lite"
     ]
 
-    # Remove duplicates
     models_to_try = list(dict.fromkeys(fallback_models))
 
     last_error = None
@@ -193,18 +238,14 @@ def generate_response(system_prompt, user_prompt, model):
                 last_error = e
                 error_text = str(e)
 
-                # Temporary Gemini server overload
                 if "503" in error_text or "UNAVAILABLE" in error_text:
 
                     if attempt == 0:
                         time.sleep(2)
                         continue
 
-                    # Try next fallback model
                     break
 
-                # Authentication / bad request / other errors
-                # should not silently switch models.
                 raise e
 
     st.error(
@@ -213,260 +254,182 @@ def generate_response(system_prompt, user_prompt, model):
     )
 
     if last_error:
-        st.caption(
-            f"Last error: {last_error}"
-        )
+        st.caption(f"Last error: {last_error}")
 
     return None
 
 
-# ==============================================================================
-# 5. TEXT TO SPEECH
-# ==============================================================================
+# ============================================================
+# TEXT TO SPEECH
+# ============================================================
 
 def generate_tts_audio(text):
-    """
-    Generate audio using gTTS.
-    """
 
     try:
 
-        clean_text = (
-            text
-            .replace("*", "")
-            .replace("#", "")
-            .replace("-", "")
-        )[:400]
+        audio_buffer = io.BytesIO()
 
         tts = gTTS(
-            text=clean_text,
-            lang="en",
-            slow=False
+            text=text,
+            lang="en"
         )
 
-        fp = io.BytesIO()
+        tts.write_to_fp(audio_buffer)
 
-        tts.write_to_fp(fp)
+        audio_buffer.seek(0)
 
-        fp.seek(0)
-
-        return fp.read()
+        return audio_buffer
 
     except Exception as e:
 
-        st.warning(
-            f"Audio generation failed: {e}"
-        )
+        st.error(f"TTS error: {e}")
 
         return None
 
 
-# ==============================================================================
-# 6. PDF GENERATION
-# ==============================================================================
+# ============================================================
+# PDF GENERATION
+# ============================================================
 
 def generate_pdf_bytes(title, content):
-    """
-    Generate a simple PDF document.
-    """
 
     pdf = FPDF()
 
     pdf.add_page()
 
-    pdf.set_font(
-        "Helvetica",
-        size=16,
-        style="B"
+    pdf.set_auto_page_break(
+        auto=True,
+        margin=15
     )
 
-    pdf.cell(
-        200,
+    pdf.set_font(
+        "Arial",
+        "B",
+        16
+    )
+
+    pdf.multi_cell(
+        0,
         10,
-        txt=title,
-        ln=1,
-        align="C"
+        title
     )
 
     pdf.ln(5)
 
     pdf.set_font(
-        "Helvetica",
-        size=10
+        "Arial",
+        size=11
     )
 
-    clean_content = (
-        content
-        .encode("latin-1", "replace")
-        .decode("latin-1")
-    )
+    clean_content = content.encode(
+        "latin-1",
+        "replace"
+    ).decode("latin-1")
 
     pdf.multi_cell(
         0,
-        6,
-        txt=clean_content
+        7,
+        clean_content
     )
 
     return bytes(pdf.output())
 
 
-# ==============================================================================
-# 7. DUCKDUCKGO WEB SEARCH
-# ==============================================================================
+# ============================================================
+# WEB SEARCH
+# ============================================================
 
-try:
-
-    from duckduckgo_search import DDGS
-
-except ImportError:
-
-    try:
-        from ddgs import DDGS
-
-    except ImportError:
-
-        DDGS = None
-
-
-def web_search(query):
-    """
-    Search the web using DuckDuckGo.
-    """
+def web_search(query, max_results=6):
 
     if DDGS is None:
-        return []
+        return "Web search package is not installed."
+
+    results = []
 
     try:
 
         with DDGS() as ddgs:
 
-            results = list(
-                ddgs.text(
-                    query,
-                    max_results=3
-                )
+            search_results = ddgs.text(
+                query,
+                max_results=max_results
             )
 
-            return [
-                f"- [{r['title']}]({r['href']}): {r['body']}"
-                for r in results
-            ]
+            for result in search_results:
 
-    except Exception:
+                title = result.get(
+                    "title",
+                    ""
+                )
 
-        return []
+                body = result.get(
+                    "body",
+                    ""
+                )
+
+                href = result.get(
+                    "href",
+                    ""
+                )
+
+                results.append(
+                    f"Title: {title}\n"
+                    f"Description: {body}\n"
+                    f"URL: {href}"
+                )
+
+    except Exception as e:
+
+        return f"Web search unavailable: {e}"
+
+    if not results:
+        return "No useful web-search results were found."
+
+    return "\n\n".join(results)
 
 
-# ==============================================================================
-# 8. SIDEBAR
-# ==============================================================================
+# ============================================================
+# TITLE
+# ============================================================
 
-st.sidebar.title(
-    "📍 Smart Local Guide"
+st.title("🧭 Smart Local Guide")
+
+st.write(
+    "Your AI-powered assistant for travel planning, "
+    "local discovery, neighborhoods, cafes and medical services."
 )
 
-st.sidebar.markdown(
-    "Cloud-powered neighborhood discovery & planning."
-)
 
+# ============================================================
+# TABS
+# ============================================================
 
-# API key
-user_api_key = st.sidebar.text_input(
-    "Google AI Studio API Key",
-    type="password",
-    help=(
-        "Leave blank if GEMINI_API_KEY is already "
-        "set in your environment variables."
-    )
-)
-
-
-# Model selection
-model_choice = st.sidebar.selectbox(
-    "Gemini Model",
+tabs = st.tabs(
     [
-        "gemini-3.6-flash",
-        "gemini-3.7-flash",
-        "gemini-3.8-flash",
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite"
-    ]
-)
-
-
-st.sidebar.markdown("---")
-
-
-# Geofencing
-st.sidebar.subheader(
-    "⚙️ Domain Guardrails"
-)
-
-strict_geofence = st.sidebar.checkbox(
-    "Strict 3 km Radius Geofencing",
-    value=True
-)
-
-
-# Create client
-client = get_gemini_client(
-    user_api_key
-)
-
-
-# ==============================================================================
-# 9. MAIN TITLE
-# ==============================================================================
-
-st.title(
-    "🏙️ Smart Local Guide"
-)
-
-
-# ==============================================================================
-# 10. TABS
-# ==============================================================================
-
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    [
-        "🗓️ Itinerary Planner",
-        "📌 Places Near You",
-        "📝 Area Summarizer",
+        "🗺️ Itinerary Planner",
+        "📍 Places Near You",
+        "🏙️ Area Summarizer",
         "☕ Quiet Work Cafes",
         "🏥 24/7 Medical Care"
     ]
 )
 
 
-# ==============================================================================
-# TAB 1 — ITINERARY PLANNER
-# ==============================================================================
+# ============================================================
+# TAB 1 - ITINERARY PLANNER
+# ============================================================
 
-with tab1:
+with tabs[0]:
 
-    st.header(
-        "Plan Your Perfect Trip"
-    )
-
-
-    # --------------------------------------------------------------------------
-    # LOCATION
-    # --------------------------------------------------------------------------
+    st.header("🗺️ Itinerary Planner")
 
     city = st.text_input(
-        "📍 City / Neighborhood",
-        "SoHo, New York",
-        key="itinerary_city"
+        "City / Neighborhood",
+        placeholder="e.g. Connaught Place, Delhi"
     )
 
-
-    # --------------------------------------------------------------------------
-    # DURATION
-    # --------------------------------------------------------------------------
-
     duration = st.selectbox(
-        "📅 Duration of Stay",
+        "Duration of Stay",
         [
             "1 Day",
             "2 Days",
@@ -477,17 +440,7 @@ with tab1:
             "7 Days",
             "1 Week",
             "2 Weeks"
-        ],
-        key="itinerary_duration"
-    )
-
-
-    # --------------------------------------------------------------------------
-    # BUDGET
-    # --------------------------------------------------------------------------
-
-    st.subheader(
-        "💰 Budget"
+        ]
     )
 
     budget = st.slider(
@@ -495,44 +448,24 @@ with tab1:
         min_value=500,
         max_value=100000,
         value=5000,
-        step=500,
-        key="itinerary_budget"
+        step=500
     )
-
-    st.caption(
-        f"Selected budget: ₹{budget:,} per person"
-    )
-
-
-    # --------------------------------------------------------------------------
-    # INTERESTS
-    # --------------------------------------------------------------------------
 
     interests = st.multiselect(
-        "🎯 Interests",
+        "Interests",
         [
-            "☕ Coffee & Bakery",
-            "🎨 Art & Galleries",
-            "🛍️ Shopping",
-            "🌳 Parks & Nature",
-            "🏛️ Historical Sites",
-            "🎭 Entertainment & Nightlife",
-            "📸 Photography & Scenic Places"
-        ],
-        default=[
-            "☕ Coffee & Bakery",
-            "🎨 Art & Galleries"
-        ],
-        key="itinerary_interests"
+            "Coffee & Bakery",
+            "Art & Galleries",
+            "Shopping",
+            "Parks & Nature",
+            "Historical Sites",
+            "Entertainment & Nightlife",
+            "Photography & Scenic Places"
+        ]
     )
 
-
-    # --------------------------------------------------------------------------
-    # EATING PREFERENCE
-    # --------------------------------------------------------------------------
-
     eating_preference = st.multiselect(
-        "🍽️ Eating Preference",
+        "Eating Preference",
         [
             "Indian",
             "Vegetarian",
@@ -542,218 +475,200 @@ with tab1:
             "Fine Dining",
             "Budget-Friendly Food",
             "Cafes & Bakeries"
-        ],
-        default=[
-            "Budget-Friendly Food"
-        ],
-        key="itinerary_food"
+        ]
     )
 
-
-    # --------------------------------------------------------------------------
-    # GROUP TYPE
-    # --------------------------------------------------------------------------
-
-    group_type = st.radio(
-        "👥 Group Type",
+    group_type = st.selectbox(
+        "Group Type",
         [
             "Solo",
             "Couple",
             "Family",
             "Friends"
-        ],
-        horizontal=True,
-        key="itinerary_group"
+        ]
     )
-
-
-    # --------------------------------------------------------------------------
-    # GENERATE ITINERARY
-    # --------------------------------------------------------------------------
 
     if st.button(
         "✨ Generate Itinerary",
-        key="btn_itinerary"
+        key="generate_itinerary"
     ):
 
-        if not client:
+        if not city.strip():
 
-            st.error(
-                "Gemini Client not initialized. "
-                "Please enter a Google AI Studio API key."
+            st.warning(
+                "Please enter a city or neighborhood."
             )
 
         else:
 
-            with st.spinner(
-                "Crafting your customized itinerary..."
-            ):
+            radius_instruction = ""
 
-                interests_text = (
-                    ", ".join(interests)
-                    if interests
-                    else "General sightseeing"
+            if strict_radius:
+
+                radius_instruction = """
+                Prefer activities and places within approximately
+                3 km of the selected location whenever possible.
+                """
+
+            system_prompt = """
+            You are a helpful travel planning assistant.
+            Create practical, realistic and well-organized
+            travel itineraries.
+            """
+
+            user_prompt = f"""
+            Create a travel itinerary for:
+
+            Location:
+            {city}
+
+            Duration:
+            {duration}
+
+            Approximate budget per person:
+            ₹{budget}
+
+            Interests:
+            {", ".join(interests) if interests else "General sightseeing"}
+
+            Eating preferences:
+            {", ".join(eating_preference) if eating_preference else "Flexible"}
+
+            Group type:
+            {group_type}
+
+            {radius_instruction}
+
+            Requirements:
+
+            1. Break the itinerary down by day.
+            2. Include morning, afternoon and evening activities.
+            3. Include food suggestions based on eating preferences.
+            4. Consider the selected group type.
+            5. Keep estimated spending around the selected budget.
+            6. Show estimated costs in Indian Rupees.
+            7. Include transportation costs where useful.
+            8. Include entry fees where applicable.
+            9. Group nearby activities together when possible.
+            10. Clearly mention that prices and availability are estimates.
+            11. If the budget may not be sufficient, explain why.
+            12. Keep the itinerary practical and easy to follow.
+            """
+
+            result = generate_response(
+                system_prompt,
+                user_prompt,
+                model_choice
+            )
+
+            if result:
+
+                st.session_state.itinerary_history.append(
+                    {
+                        "location": city,
+                        "duration": duration,
+                        "budget": budget,
+                        "result": result
+                    }
                 )
 
-                food_text = (
-                    ", ".join(eating_preference)
-                    if eating_preference
-                    else "No specific preference"
+                st.success(
+                    "Itinerary generated successfully!"
                 )
 
+                st.markdown(result)
 
-                prompt = f"""
-Create a detailed travel itinerary.
+                # TTS
+                audio = generate_tts_audio(result)
 
-LOCATION:
-{city}
+                if audio:
 
-DURATION:
-{duration}
+                    st.audio(
+                        audio,
+                        format="audio/mp3"
+                    )
 
-BUDGET:
-₹{budget:,} per person
-
-GROUP TYPE:
-{group_type}
-
-INTERESTS:
-{interests_text}
-
-EATING PREFERENCES:
-{food_text}
-
-STRICT 3 KM GEOFENCING:
-{strict_geofence}
-
-IMPORTANT:
-
-1. Plan the entire trip according to the selected duration.
-
-2. Keep the estimated spending within approximately
-   ₹{budget:,} per person.
-
-3. Give estimated prices in Indian Rupees.
-
-4. Break the itinerary into days.
-
-5. For each day include morning, afternoon and evening
-   activities where appropriate.
-
-6. Include restaurants and food suggestions based on
-   the selected eating preferences.
-
-7. Consider whether the group is solo, couple, family
-   or friends.
-
-8. Keep nearby activities grouped together to reduce
-   unnecessary travel.
-
-9. If strict geofencing is enabled, prioritize places
-   within approximately 3 km of the selected location.
-
-10. Include approximate transportation costs.
-
-11. Include estimated food costs.
-
-12. Include estimated attraction/entry costs where
-   applicable.
-
-13. Clearly state when the selected budget may not
-   be sufficient.
-
-14. Do not invent exact prices when uncertain.
-   Clearly label them as estimates.
-
-15. Make the itinerary easy for a traveler to follow.
-
-Use attractive Markdown headings and bullet points.
-"""
-
-
-                result_text = generate_response(
-                    system_prompt=(
-                        "You are an expert local travel guide. "
-                        "Create realistic, practical and structured "
-                        "travel itineraries."
-                    ),
-                    user_prompt=prompt,
-                    model=model_choice
+                # PDF
+                pdf_bytes = generate_pdf_bytes(
+                    f"Itinerary - {city}",
+                    result
                 )
 
+                st.download_button(
+                    "📄 Download Itinerary PDF",
+                    data=pdf_bytes,
+                    file_name="smart_local_guide_itinerary.pdf",
+                    mime="application/pdf"
+                )
 
-                if result_text:
-
-                    # Save itinerary
-                    st.session_state.itinerary_history.append(
-                        {
-                            "query": (
-                                f"{city} • "
-                                f"{duration} • "
-                                f"₹{budget:,} • "
-                                f"{group_type}"
-                            ),
-                            "content": result_text
-                        }
-                    )
-
-
-                    st.markdown(
-                        result_text
-                    )
-
-
-                    # Audio
-                    audio_data = generate_tts_audio(
-                        result_text
-                    )
-
-                    if audio_data:
-
-                        st.audio(
-                            audio_data,
-                            format="audio/mp3"
-                        )
-
-
-                    # PDF
-                    pdf_bytes = generate_pdf_bytes(
-                        f"Itinerary - {city}",
-                        result_text
-                    )
-
-                    st.download_button(
-                        "📥 Download PDF",
-                        data=pdf_bytes,
-                        file_name=(
-                            f"itinerary_"
-                            f"{city.replace(' ', '_')}.pdf"
-                        ),
-                        mime="application/pdf",
-                        key=(
-                            f"current_itinerary_pdf_"
-                            f"{len(st.session_state.itinerary_history)}"
-                        )
-                    )
-
-
-    # ==========================================================================
+    # ========================================================
     # SAVED ITINERARIES
-    # ==========================================================================
-
-    st.markdown("---")
-
-    st.subheader(
-        f"📚 Saved Itineraries "
-        f"({len(st.session_state.itinerary_history)})"
-    )
-
+    # ========================================================
 
     if st.session_state.itinerary_history:
 
+        st.markdown("---")
+
+        st.subheader("💾 Saved Itineraries")
+
+        for index, item in enumerate(
+            reversed(st.session_state.itinerary_history)
+        ):
+
+            actual_index = (
+                len(st.session_state.itinerary_history)
+                - 1
+                - index
+            )
+
+            with st.expander(
+                f"Itinerary #{actual_index + 1} - {item['location']}"
+            ):
+
+                st.write(
+                    f"**Duration:** {item['duration']}"
+                )
+
+                st.write(
+                    f"**Budget:** ₹{item['budget']}"
+                )
+
+                st.markdown(
+                    item["result"]
+                )
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+
+                    pdf_bytes = generate_pdf_bytes(
+                        f"Itinerary - {item['location']}",
+                        item["result"]
+                    )
+
+                    st.download_button(
+                        "📄 PDF",
+                        data=pdf_bytes,
+                        file_name=f"itinerary_{actual_index + 1}.pdf",
+                        mime="application/pdf",
+                        key=f"itinerary_pdf_{actual_index}"
+                    )
+
+                with col2:
+
+                    if st.button(
+                        "🗑️ Delete",
+                        key=f"delete_itinerary_{actual_index}"
+                    ):
+
+                        st.session_state.itinerary_history.pop(
+                            actual_index
+                        )
+
+                        st.rerun()
+
         if st.button(
-            "🗑️ Clear All Itineraries",
-            key="clear_itinerary_history"
+            "🗑️ Clear Itinerary History"
         ):
 
             st.session_state.itinerary_history = []
@@ -761,87 +676,22 @@ Use attractive Markdown headings and bullet points.
             st.rerun()
 
 
-        for idx, item in enumerate(
-            st.session_state.itinerary_history,
-            start=1
-        ):
+# ============================================================
+# TAB 2 - PLACES NEAR YOU
+# ============================================================
 
-            with st.expander(
-                f"🗓️ Itinerary #{idx} — {item['query']}"
-            ):
+with tabs[1]:
 
-                st.markdown(
-                    item["content"]
-                )
+    st.header("📍 Places Near You")
 
-
-                pdf_data = generate_pdf_bytes(
-                    f"Itinerary #{idx}",
-                    item["content"]
-                )
-
-
-                col1, col2 = st.columns(2)
-
-
-                with col1:
-
-                    st.download_button(
-                        "📥 Export PDF",
-                        data=pdf_data,
-                        file_name=(
-                            f"itinerary_{idx}.pdf"
-                        ),
-                        mime="application/pdf",
-                        key=(
-                            f"itinerary_download_{idx}"
-                        )
-                    )
-
-
-                with col2:
-
-                    if st.button(
-                        "🗑️ Delete",
-                        key=(
-                            f"delete_itinerary_{idx}"
-                        )
-                    ):
-
-                        st.session_state.itinerary_history.pop(
-                            idx - 1
-                        )
-
-                        st.rerun()
-
-    else:
-
-        st.info(
-            "No itineraries saved yet. "
-            "Generate your first itinerary above."
-        )
-
-
-# ==============================================================================
-# TAB 2 — PLACES NEAR YOU
-# ==============================================================================
-
-with tab2:
-
-    st.header(
-        "Discover Nearby Gems"
+    place_location = st.text_input(
+        "Location",
+        placeholder="e.g. Connaught Place, Delhi",
+        key="place_location"
     )
 
-
-    loc_input = st.text_input(
-        "📍 Your Current Location / Landmark",
-        "Eiffel Tower, Paris",
-        key="places_location"
-    )
-
-
-    category = st.selectbox(
-        "🔎 What are you looking for?",
+    place_category = st.selectbox(
+        "Category",
         [
             "Top Rated Food & Drink",
             "Hotels",
@@ -852,117 +702,139 @@ with tab2:
             "Cultural Landmarks",
             "Parks & Nature",
             "Hidden Gems"
-        ],
-        key="places_category"
+        ]
     )
-
 
     if st.button(
         "🔎 Find Places",
-        key="btn_places"
+        key="find_places"
     ):
 
-        if not client:
+        if not place_location.strip():
 
-            st.error(
-                "Gemini Client not initialized."
+            st.warning(
+                "Please enter a location."
             )
 
         else:
 
-            with st.spinner(
-                "Searching nearby recommendations..."
-            ):
+            search_query = (
+                f"{place_category} near "
+                f"{place_location}"
+            )
 
-                search_results = web_search(
-                    f"{category} near {loc_input}"
+            search_context = web_search(
+                search_query
+            )
+
+            radius_instruction = ""
+
+            if strict_radius:
+
+                radius_instruction = """
+                Prefer results within approximately
+                3 km of the specified location.
+                """
+
+            system_prompt = """
+            You are a local discovery assistant.
+            Use the supplied search information carefully.
+            Do not invent facts when information is unavailable.
+            """
+
+            user_prompt = f"""
+            Find and organize useful recommendations for:
+
+            Location:
+            {place_location}
+
+            Category:
+            {place_category}
+
+            {radius_instruction}
+
+            Web search context:
+            {search_context}
+
+            Give approximately 5 useful recommendations.
+
+            For each recommendation include:
+
+            - Name
+            - Location or distance if available
+            - Address or area
+            - Why it is useful
+            - Opening hours if available
+            - Price level if available
+
+            Clearly identify information that could not be verified.
+            """
+
+            result = generate_response(
+                system_prompt,
+                user_prompt,
+                model_choice
+            )
+
+            if result:
+
+                st.session_state.places_history.append(
+                    {
+                        "location": place_location,
+                        "category": place_category,
+                        "result": result
+                    }
                 )
 
-
-                search_context = (
-                    "\n".join(search_results)
-                    if search_results
-                    else "No live web snippets found."
+                st.success(
+                    "Places found successfully!"
                 )
 
+                st.markdown(result)
 
-                prompt = f"""
-Find approximately 5 useful recommendations.
-
-LOCATION:
-{loc_input}
-
-CATEGORY:
-{category}
-
-RADIUS:
-3 km
-
-STRICT GEOFENCING:
-{strict_geofence}
-
-WEB SEARCH CONTEXT:
-{search_context}
-
-For every recommendation provide:
-
-1. Name
-2. Approximate distance
-3. Address or area
-4. Why it is useful or special
-5. Opening hours if available
-6. Approximate price level where relevant
-
-Do not pretend uncertain information is verified.
-Clearly label estimates.
-"""
-
-
-                result_text = generate_response(
-                    system_prompt=(
-                        "You are a local concierge. "
-                        "Provide useful and factual nearby recommendations."
-                    ),
-                    user_prompt=prompt,
-                    model=model_choice
-                )
-
-
-                if result_text:
-
-                    st.session_state.places_history.append(
-                        {
-                            "query": (
-                                f"{category} near "
-                                f"{loc_input}"
-                            ),
-                            "content": result_text
-                        }
-                    )
-
-
-                    st.markdown(
-                        result_text
-                    )
-
-
-    # ==========================================================================
+    # ========================================================
     # SAVED PLACES
-    # ==========================================================================
-
-    st.markdown("---")
-
-    st.subheader(
-        f"📚 Saved Places Searches "
-        f"({len(st.session_state.places_history)})"
-    )
-
+    # ========================================================
 
     if st.session_state.places_history:
 
+        st.markdown("---")
+
+        st.subheader("💾 Saved Place Searches")
+
+        for index, item in enumerate(
+            reversed(st.session_state.places_history)
+        ):
+
+            actual_index = (
+                len(st.session_state.places_history)
+                - 1
+                - index
+            )
+
+            with st.expander(
+                f"Search #{actual_index + 1} - "
+                f"{item['location']} - "
+                f"{item['category']}"
+            ):
+
+                st.markdown(
+                    item["result"]
+                )
+
+                if st.button(
+                    "🗑️ Delete",
+                    key=f"delete_place_{actual_index}"
+                ):
+
+                    st.session_state.places_history.pop(
+                        actual_index
+                    )
+
+                    st.rerun()
+
         if st.button(
-            "🗑️ Clear All Places Searches",
-            key="clear_places_history"
+            "🗑️ Clear Places History"
         ):
 
             st.session_state.places_history = []
@@ -970,157 +842,123 @@ Clearly label estimates.
             st.rerun()
 
 
-        for idx, item in enumerate(
-            st.session_state.places_history,
-            start=1
-        ):
+# ============================================================
+# TAB 3 - AREA SUMMARIZER
+# ============================================================
 
-            with st.expander(
-                f"📌 Places Search #{idx} — {item['query']}"
-            ):
+with tabs[2]:
 
-                st.markdown(
-                    item["content"]
-                )
+    st.header("🏙️ Area / Neighborhood Summarizer")
 
-
-                pdf_data = generate_pdf_bytes(
-                    f"Places Search #{idx}",
-                    item["content"]
-                )
-
-
-                col1, col2 = st.columns(2)
-
-
-                with col1:
-
-                    st.download_button(
-                        "📥 Export PDF",
-                        data=pdf_data,
-                        file_name=f"places_{idx}.pdf",
-                        mime="application/pdf",
-                        key=f"places_download_{idx}"
-                    )
-
-
-                with col2:
-
-                    if st.button(
-                        "🗑️ Delete",
-                        key=f"delete_places_{idx}"
-                    ):
-
-                        st.session_state.places_history.pop(
-                            idx - 1
-                        )
-
-                        st.rerun()
-
-    else:
-
-        st.info(
-            "No places searches saved yet."
-        )
-
-
-# ==============================================================================
-# TAB 3 — AREA SUMMARIZER
-# ==============================================================================
-
-with tab3:
-
-    st.header(
-        "Get an Area Snapshot"
+    area_location = st.text_input(
+        "Neighborhood / ZIP / Postal Code",
+        placeholder="e.g. 110001 or Connaught Place",
+        key="area_location"
     )
-
-
-    neighborhood = st.text_input(
-        "Neighborhood or Zip Code",
-        "Shoreditch, London",
-        key="area_neighborhood"
-    )
-
 
     if st.button(
-        "📝 Summarize Neighborhood",
-        key="btn_summarize"
+        "🏙️ Summarize Area",
+        key="summarize_area"
     ):
 
-        if not client:
+        if not area_location.strip():
 
-            st.error(
-                "Gemini Client not initialized."
+            st.warning(
+                "Please enter an area."
             )
 
         else:
 
-            with st.spinner(
-                "Analyzing neighborhood profile..."
-            ):
+            system_prompt = """
+            You are an area and neighborhood analysis assistant.
+            Provide practical and balanced information.
+            """
 
-                prompt = f"""
-Provide a comprehensive snapshot of:
+            user_prompt = f"""
+            Give an overview of:
 
-{neighborhood}
+            {area_location}
 
-Include:
+            Discuss:
 
-- Overall Vibe
-- Safety & Walkability
-- Public Transit Access
-- Food & Nightlife Overview
-- Shopping
-- Attractions
-- Best Time to Visit
+            - Restaurants
+            - Cafes
+            - ATMs
+            - Hospitals
+            - Attractions
+            - Shopping
+            - General character of the area
+            - Useful facilities
+            - Potential advantages
+            - Potential disadvantages
 
-Clearly distinguish general information
-from uncertain estimates.
-"""
+            Keep the explanation practical.
+            Clearly identify information that may need verification.
+            """
 
+            result = generate_response(
+                system_prompt,
+                user_prompt,
+                model_choice
+            )
 
-                result_text = generate_response(
-                    system_prompt=(
-                        "You are a neighborhood analyst "
-                        "providing structured local overviews."
-                    ),
-                    user_prompt=prompt,
-                    model=model_choice
+            if result:
+
+                st.session_state.area_history.append(
+                    {
+                        "location": area_location,
+                        "result": result
+                    }
                 )
 
+                st.success(
+                    "Area summary generated!"
+                )
 
-                if result_text:
+                st.markdown(result)
 
-                    st.session_state.area_history.append(
-                        {
-                            "query": neighborhood,
-                            "content": result_text
-                        }
-                    )
-
-
-                    st.markdown(
-                        result_text
-                    )
-
-
-    # ==========================================================================
+    # ========================================================
     # SAVED AREA SUMMARIES
-    # ==========================================================================
-
-    st.markdown("---")
-
-    st.subheader(
-        f"📚 Saved Area Summaries "
-        f"({len(st.session_state.area_history)})"
-    )
-
+    # ========================================================
 
     if st.session_state.area_history:
 
+        st.markdown("---")
+
+        st.subheader("💾 Saved Area Summaries")
+
+        for index, item in enumerate(
+            reversed(st.session_state.area_history)
+        ):
+
+            actual_index = (
+                len(st.session_state.area_history)
+                - 1
+                - index
+            )
+
+            with st.expander(
+                f"Summary #{actual_index + 1} - "
+                f"{item['location']}"
+            ):
+
+                st.markdown(
+                    item["result"]
+                )
+
+                if st.button(
+                    "🗑️ Delete",
+                    key=f"delete_area_{actual_index}"
+                ):
+
+                    st.session_state.area_history.pop(
+                        actual_index
+                    )
+
+                    st.rerun()
+
         if st.button(
-            "🗑️ Clear All Area Summaries",
-            key="clear_area_history"
+            "🗑️ Clear Area History"
         ):
 
             st.session_state.area_history = []
@@ -1128,165 +966,139 @@ from uncertain estimates.
             st.rerun()
 
 
-        for idx, item in enumerate(
-            st.session_state.area_history,
-            start=1
-        ):
+# ============================================================
+# TAB 4 - QUIET WORK CAFES
+# ============================================================
 
-            with st.expander(
-                f"📝 Area Summary #{idx} — {item['query']}"
-            ):
+with tabs[3]:
 
-                st.markdown(
-                    item["content"]
-                )
+    st.header("☕ Quiet Work Cafes")
 
-
-                pdf_data = generate_pdf_bytes(
-                    f"Area Summary #{idx}",
-                    item["content"]
-                )
-
-
-                st.download_button(
-                    "📥 Export PDF",
-                    data=pdf_data,
-                    file_name=(
-                        f"area_summary_{idx}.pdf"
-                    ),
-                    mime="application/pdf",
-                    key=f"area_download_{idx}"
-                )
-
-    else:
-
-        st.info(
-            "No area summaries saved yet."
-        )
-
-
-# ==============================================================================
-# TAB 4 — QUIET WORK CAFES
-# ==============================================================================
-
-with tab4:
-
-    st.header(
-        "Find Quiet Work & Study Spots"
+    cafe_location = st.text_input(
+        "Location",
+        placeholder="e.g. South Delhi",
+        key="cafe_location"
     )
 
-
-    cafe_loc = st.text_input(
-        "📍 Location",
-        "Downtown Seattle",
-        key="cafe_loc"
-    )
-
-
-    amenities = st.multiselect(
-        "Required Amenities",
+    cafe_amenities = st.multiselect(
+        "Preferred Amenities",
         [
-            "Fast Wi-Fi",
-            "Power Outlets",
-            "Quiet Atmosphere",
-            "Good Coffee",
-            "Spacious Seating"
-        ],
-        default=[
-            "Fast Wi-Fi",
-            "Power Outlets"
-        ],
-        key="cafe_amenities"
+            "Wi-Fi",
+            "Power outlets",
+            "Quiet environment",
+            "Air conditioning",
+            "Long seating",
+            "Good coffee",
+            "Food availability"
+        ]
     )
-
 
     if st.button(
-        "☕ Find Cafes",
-        key="btn_cafes"
+        "☕ Find Work Cafes",
+        key="find_cafes"
     ):
 
-        if not client:
+        if not cafe_location.strip():
 
-            st.error(
-                "Gemini Client not initialized."
+            st.warning(
+                "Please enter a location."
             )
 
         else:
 
-            with st.spinner(
-                "Locating optimal work spots..."
-            ):
+            system_prompt = """
+            You are a cafe recommendation assistant.
+            """
 
-                prompt = f"""
-Recommend 3-4 laptop-friendly cafes in:
+            user_prompt = f"""
+            Recommend quiet work-friendly cafes around:
 
-{cafe_loc}
+            Location:
+            {cafe_location}
 
-Required amenities:
+            Preferred amenities:
+            {", ".join(cafe_amenities)
+            if cafe_amenities
+            else "General work-friendly amenities"}
 
-{', '.join(amenities)}
+            Provide useful recommendations.
 
-Strict 3 km proximity:
+            Mention:
+            - Cafe name
+            - Location
+            - Why it may be suitable for work
+            - Amenities
+            - Price level if available
+            - Any useful practical information
 
-{strict_geofence}
+            Do not invent information.
+            Clearly mention uncertainty where appropriate.
+            """
 
-For every cafe include:
+            result = generate_response(
+                system_prompt,
+                user_prompt,
+                model_choice
+            )
 
-- Name
-- Approximate distance
-- Wi-Fi
-- Power outlets
-- Noise level
-- Seating
-- Coffee quality
-- Useful study/work information
+            if result:
 
-Clearly label uncertain information.
-"""
-
-
-                result_text = generate_response(
-                    system_prompt=(
-                        "You are a remote worker assistant "
-                        "specializing in finding laptop-friendly spots."
-                    ),
-                    user_prompt=prompt,
-                    model=model_choice
+                st.session_state.cafe_history.append(
+                    {
+                        "location": cafe_location,
+                        "amenities": cafe_amenities,
+                        "result": result
+                    }
                 )
 
+                st.success(
+                    "Cafe recommendations generated!"
+                )
 
-                if result_text:
+                st.markdown(result)
 
-                    st.session_state.cafe_history.append(
-                        {
-                            "query": cafe_loc,
-                            "content": result_text
-                        }
-                    )
-
-
-                    st.markdown(
-                        result_text
-                    )
-
-
-    # ==========================================================================
-    # SAVED CAFE SEARCHES
-    # ==========================================================================
-
-    st.markdown("---")
-
-    st.subheader(
-        f"📚 Saved Cafe Searches "
-        f"({len(st.session_state.cafe_history)})"
-    )
-
+    # ========================================================
+    # SAVED CAFES
+    # ========================================================
 
     if st.session_state.cafe_history:
 
+        st.markdown("---")
+
+        st.subheader("💾 Saved Cafe Searches")
+
+        for index, item in enumerate(
+            reversed(st.session_state.cafe_history)
+        ):
+
+            actual_index = (
+                len(st.session_state.cafe_history)
+                - 1
+                - index
+            )
+
+            with st.expander(
+                f"Search #{actual_index + 1} - "
+                f"{item['location']}"
+            ):
+
+                st.markdown(
+                    item["result"]
+                )
+
+                if st.button(
+                    "🗑️ Delete",
+                    key=f"delete_cafe_{actual_index}"
+                ):
+
+                    st.session_state.cafe_history.pop(
+                        actual_index
+                    )
+
+                    st.rerun()
+
         if st.button(
-            "🗑️ Clear All Cafe Searches",
-            key="clear_cafe_history"
+            "🗑️ Clear Cafe History"
         ):
 
             st.session_state.cafe_history = []
@@ -1294,218 +1106,163 @@ Clearly label uncertain information.
             st.rerun()
 
 
-        for idx, item in enumerate(
-            st.session_state.cafe_history,
-            start=1
-        ):
+# ============================================================
+# TAB 5 - MEDICAL CARE
+# ============================================================
 
-            with st.expander(
-                f"☕ Cafe Search #{idx} — {item['query']}"
-            ):
+with tabs[4]:
 
-                st.markdown(
-                    item["content"]
-                )
+    st.header("🏥 24/7 Medical Care")
 
-
-                pdf_data = generate_pdf_bytes(
-                    f"Cafe Search #{idx}",
-                    item["content"]
-                )
-
-
-                st.download_button(
-                    "📥 Export PDF",
-                    data=pdf_data,
-                    file_name=f"cafes_{idx}.pdf",
-                    mime="application/pdf",
-                    key=f"cafe_download_{idx}"
-                )
-
-    else:
-
-        st.info(
-            "No cafe searches saved yet."
-        )
-
-
-# ==============================================================================
-# TAB 5 — MEDICAL CARE
-# ==============================================================================
-
-with tab5:
-
-    st.header(
-        "Emergency & Urgent Care Search"
+    medical_location = st.text_input(
+        "Location",
+        placeholder="e.g. Noida Sector 18",
+        key="medical_location"
     )
 
-
-    med_loc = st.text_input(
-        "📍 Your Emergency Location",
-        "Central Station, Berlin",
-        key="med_location"
-    )
-
-
-    care_type = st.radio(
-        "Type of Care Needed",
+    medical_type = st.selectbox(
+        "Medical Service",
         [
-            "24/7 Hospital / ER",
-            "Urgent Care Clinic",
+            "24/7 Hospital / Emergency Room",
+            "Urgent Care",
             "Late Night Pharmacy"
-        ],
-        key="medical_type"
+        ]
     )
-
 
     if st.button(
-        "🏥 Find Nearest Care",
-        key="btn_med"
+        "🏥 Find Medical Services",
+        key="find_medical"
     ):
 
-        if not client:
+        if not medical_location.strip():
 
-            st.error(
-                "Gemini Client not initialized."
+            st.warning(
+                "Please enter a location."
             )
 
         else:
 
-            with st.spinner(
-                "Locating medical facilities..."
-            ):
+            search_query = (
+                f"{medical_type} near "
+                f"{medical_location}"
+            )
 
-                search_results = web_search(
-                    f"{care_type} near {med_loc}"
+            search_context = web_search(
+                search_query
+            )
+
+            radius_instruction = ""
+
+            if strict_radius:
+
+                radius_instruction = """
+                Prefer results within approximately
+                3 km of the specified location.
+                """
+
+            system_prompt = """
+            You are a medical-location information assistant.
+            Accuracy and uncertainty are important.
+            """
+
+            user_prompt = f"""
+            Find useful medical services around:
+
+            Location:
+            {medical_location}
+
+            Service:
+            {medical_type}
+
+            {radius_instruction}
+
+            Search context:
+            {search_context}
+
+            Provide:
+
+            - Name
+            - Location/address
+            - Available service
+            - Opening or availability information if found
+            - Contact information if available
+            - Other useful details
+
+            Clearly state when information could not be verified.
+
+            Do not claim that a medical facility is currently
+            open or available unless the information supports it.
+            """
+
+            result = generate_response(
+                system_prompt,
+                user_prompt,
+                model_choice
+            )
+
+            if result:
+
+                st.session_state.medical_history.append(
+                    {
+                        "location": medical_location,
+                        "type": medical_type,
+                        "result": result
+                    }
                 )
 
-
-                search_context = (
-                    "\n".join(search_results)
-                    if search_results
-                    else ""
+                st.warning(
+                    "For emergencies, always contact "
+                    "local emergency services or the "
+                    "medical facility directly."
                 )
 
+                st.markdown(result)
 
-                prompt = f"""
-Find the nearest verified:
-
-{care_type}
-
-near:
-
-{med_loc}
-
-SEARCH RADIUS:
-3 km
-
-STRICT GEOFENCING:
-{strict_geofence}
-
-WEB SEARCH CONTEXT:
-
-{search_context}
-
-Provide:
-
-- Facility name
-- Approximate distance
-- Address
-- Opening status if available
-- Phone number if available
-- Emergency contact information if applicable
-
-Do not invent emergency numbers or opening hours.
-
-If information cannot be verified,
-clearly say so.
-"""
-
-
-                result_text = generate_response(
-                    system_prompt=(
-                        "You are an urgent assistance system. "
-                        "Provide clean and factual information. "
-                        "For emergencies, tell users to contact "
-                        "their local emergency services immediately."
-                    ),
-                    user_prompt=prompt,
-                    model=model_choice
-                )
-
-
-                if result_text:
-
-                    st.session_state.medical_history.append(
-                        {
-                            "query": (
-                                f"{care_type} - "
-                                f"{med_loc}"
-                            ),
-                            "content": result_text
-                        }
-                    )
-
-
-                    st.markdown(
-                        result_text
-                    )
-
-
-    # ==========================================================================
+    # ========================================================
     # SAVED MEDICAL SEARCHES
-    # ==========================================================================
-
-    st.markdown("---")
-
-    st.subheader(
-        f"📚 Saved Medical Searches "
-        f"({len(st.session_state.medical_history)})"
-    )
-
+    # ========================================================
 
     if st.session_state.medical_history:
 
+        st.markdown("---")
+
+        st.subheader("💾 Saved Medical Searches")
+
+        for index, item in enumerate(
+            reversed(st.session_state.medical_history)
+        ):
+
+            actual_index = (
+                len(st.session_state.medical_history)
+                - 1
+                - index
+            )
+
+            with st.expander(
+                f"Search #{actual_index + 1} - "
+                f"{item['location']} - "
+                f"{item['type']}"
+            ):
+
+                st.markdown(
+                    item["result"]
+                )
+
+                if st.button(
+                    "🗑️ Delete",
+                    key=f"delete_medical_{actual_index}"
+                ):
+
+                    st.session_state.medical_history.pop(
+                        actual_index
+                    )
+
+                    st.rerun()
+
         if st.button(
-            "🗑️ Clear All Medical Searches",
-            key="clear_medical_history"
+            "🗑️ Clear Medical History"
         ):
 
             st.session_state.medical_history = []
 
             st.rerun()
-
-
-        for idx, item in enumerate(
-            st.session_state.medical_history,
-            start=1
-        ):
-
-            with st.expander(
-                f"🏥 Medical Search #{idx} — {item['query']}"
-            ):
-
-                st.markdown(
-                    item["content"]
-                )
-
-
-                pdf_data = generate_pdf_bytes(
-                    f"Medical Search #{idx}",
-                    item["content"]
-                )
-
-
-                st.download_button(
-                    "📥 Export PDF",
-                    data=pdf_data,
-                    file_name=f"medical_{idx}.pdf",
-                    mime="application/pdf",
-                    key=f"medical_download_{idx}"
-                )
-
-    else:
-
-        st.info(
-            "No medical searches saved yet."
-        )
